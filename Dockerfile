@@ -80,12 +80,32 @@ RUN curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o /us
     curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y tailscale
 
-# Install latest stable Go from go.dev (the golang-go apt package lags behind)
-RUN ARCH=$(dpkg --print-architecture) && \
-    GO_VERSION=$(curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[0].version') && \
-    curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -xzC /usr/local && \
+# Modify existing ubuntu user (UID 1000) to become exedev user.
+# Must run before any COPY into /home/exedev so mv sees a non-existent target.
+RUN usermod -l exedev -c "exe.dev user" ubuntu && \
+	groupmod -n exedev ubuntu && \
+	mv /home/ubuntu /home/exedev && \
+	usermod -d /home/exedev exedev && \
+	usermod -aG sudo exedev && \
+	usermod -aG docker exedev && \
+	sed -i 's/^ubuntu:/exedev:/' /etc/subuid /etc/subgid && \
+	echo 'exedev ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+	echo 'Defaults:exedev verifypw=any' >> /etc/sudoers && \
+	mkdir -p /var/lib/systemd/linger && \
+	touch /var/lib/systemd/linger/exedev
+
+# The devel Go source tree from the host via a named build context
+# (--build-context go-src=$HOME/w/go). Lives at ~/src/go;
+# /usr/local/go symlinks into it so system PATH assumptions hold.
+COPY --from=go-src --chown=1000:1000 . /home/exedev/src/go/
+RUN ln -s /home/exedev/src/go /usr/local/go && \
     ln -s /usr/local/go/bin/go /usr/local/bin/go && \
     ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+# Bootstrap Go SDK for rebuilding the devel toolchain after source
+# updates via make.bash. GOROOT_BOOTSTRAP=~/sdk/go1.25.6
+# (--build-context go-bootstrap=$HOME/sdk/go1.25.6)
+COPY --from=go-bootstrap --chown=1000:1000 . /home/exedev/sdk/go/
 
 COPY --from=exeuntu-cli /out/exeuntu /usr/local/bin/exeuntu
 
@@ -192,20 +212,6 @@ RUN rm /etc/systemd/system/multi-user.target.wants/console-setup.service \
 		echo 'Storage=persistent' >> /etc/systemd/journald.conf.d/persistent.conf && \
 	systemctl set-default multi-user.target
 
-# Modify existing ubuntu user (UID 1000) to become exedev user
-RUN usermod -l exedev -c "exe.dev user" ubuntu && \
-	groupmod -n exedev ubuntu && \
-	mv /home/ubuntu /home/exedev && \
-	usermod -d /home/exedev exedev && \
-	usermod -aG sudo exedev && \
-	usermod -aG docker exedev && \
-	sed -i 's/^ubuntu:/exedev:/' /etc/subuid /etc/subgid && \
-	echo 'exedev ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
-	echo 'Defaults:exedev verifypw=any' >> /etc/sudoers && \
-	# Manually enable linger, this should autopopulate /run/user/1000
-	mkdir -p /var/lib/systemd/linger && \
-	touch /var/lib/systemd/linger/exedev
-
 # Bake /etc/fstab so systemd-growfs@-.service resizes the root filesystem on
 # first boot after the disk is grown.
 RUN echo '/dev/vda / ext4 defaults,x-systemd.growfs 0 1' > /etc/fstab
@@ -221,8 +227,12 @@ ENV EXEUNTU=1
 COPY --from=chrome /headless-shell /headless-shell
 ENV PATH="/usr/local/bin:/headless-shell:${PATH}"
 
-RUN mkdir -p /home/exedev /home/exedev/.config/shelley && \
-    chown exedev:exedev /home/exedev /home/exedev/.config /home/exedev/.config/shelley
+RUN mkdir -p /home/exedev /home/exedev/.config/shelley \
+             /home/exedev/vcs /home/exedev/.yah/logs && \
+    chown exedev:exedev /home/exedev /home/exedev/.config \
+          /home/exedev/.config/shelley \
+          /home/exedev/src /home/exedev/vcs \
+          /home/exedev/.yah /home/exedev/.yah/logs
 
 USER exedev
 
@@ -232,13 +242,19 @@ WORKDIR /home/exedev
 # XDG paths are not autopopulated despite the presense of libpam-systemd. Manually add them here.
 RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/exedev/.bashrc && \
     echo 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"' >> /home/exedev/.bashrc && \
-    echo 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"' >> /home/exedev/.profile
+    echo 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"' >> /home/exedev/.profile && \
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/exedev/.profile
 
 # Configure git to use 'main' as default branch name
 RUN git config --global init.defaultBranch main
 
 # Switch back to root to install systemd service
 USER root
+
+# Tool binaries from the host via a named build context
+# (--build-context tools=$HOME/go/bin). All land in /usr/local/bin
+# so they work in SSH exec sessions without PATH setup.
+COPY --from=tools yah /usr/local/bin/yah
 
 # Disable Ubuntu's default MOTD (the sudo hint, etc.)
 RUN rm -rf /etc/update-motd.d/* /etc/motd && touch /home/exedev/.hushlogin && chown exedev:exedev /home/exedev/.hushlogin
@@ -336,6 +352,7 @@ RUN chmod 644 /var/www/html/index.html
 # Install xterm-ghostty terminfo for Ghostty terminal support
 COPY xterm-ghostty.terminfo /tmp/xterm-ghostty.terminfo
 RUN tic -x - < /tmp/xterm-ghostty.terminfo && rm /tmp/xterm-ghostty.terminfo
+
 
 # Expose the web server ports
 EXPOSE 8000 9999
