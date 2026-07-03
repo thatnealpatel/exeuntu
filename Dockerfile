@@ -47,9 +47,8 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirror://mirrors.ubuntu.c
 		make python3-pip python-is-python3 tree net-tools file build-essential \
 		pipx psmisc bsdmainutils sudo socat \
 		openssh-server openssh-client \
+		libcap2-bin unzip util-linux rsync \
 		iputils-ping socat netcat-openbsd \
-		libcap2-bin \
-		unzip util-linux rsync \
 		ubuntu-server ubuntu-dev-tools ubuntu-standard \
 		man-db manpages manpages-dev \
 		mitmproxy \
