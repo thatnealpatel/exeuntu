@@ -228,11 +228,9 @@ COPY --from=chrome /headless-shell /headless-shell
 ENV PATH="/usr/local/bin:/headless-shell:${PATH}"
 
 RUN mkdir -p /home/exedev /home/exedev/.config/shelley \
-             /home/exedev/vcs /home/exedev/.yah/logs && \
     chown exedev:exedev /home/exedev /home/exedev/.config \
-          /home/exedev/.config/shelley \
-          /home/exedev/src /home/exedev/vcs \
-          /home/exedev/.yah /home/exedev/.yah/logs
+          /home/exedev/.config/shelley 
+
 
 USER exedev
 
@@ -245,16 +243,21 @@ RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/exedev/.bashrc && \
     echo 'export XDG_RUNTIME_DIR="/run/user/$(id -u)"' >> /home/exedev/.profile && \
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/exedev/.profile
 
-# Configure git to use 'main' as default branch name
+
+# Configure git.
 RUN git config --global init.defaultBranch main
+RUN git config --global user.name "Not Neal Patel"
+RUN git config --global user.email "bots@patel.codes"
+
+
+# Configure preferences.
+RUN echo 'export EDITOR=vim' >> /home/exedev/.profile
+RUN mkdir -p /home/exedev/.yah/logs
+RUN chown exedev:exedev /home/exedev/src /home/exedev/.yah /home/exedev/.yah/logs
+
 
 # Switch back to root to install systemd service
 USER root
-
-# Tool binaries from the host via a named build context
-# (--build-context tools=$HOME/go/bin). All land in /usr/local/bin
-# so they work in SSH exec sessions without PATH setup.
-COPY --from=tools yah /usr/local/bin/yah
 
 # Disable Ubuntu's default MOTD (the sudo hint, etc.)
 RUN rm -rf /etc/update-motd.d/* /etc/motd && touch /home/exedev/.hushlogin && chown exedev:exedev /home/exedev/.hushlogin
@@ -280,69 +283,9 @@ RUN chmod 644 /etc/systemd/system/exe-setup.service && \
 # It would be better if you could indicate that via an env variable or something.
 COPY init-wrapper.sh /usr/local/bin/init
 
-# Create config directories for LLM agents
-RUN mkdir -p /home/exedev/.claude /home/exedev/.codex /home/exedev/.pi && \
-    chown -R exedev:exedev /home/exedev/.claude /home/exedev/.codex /home/exedev/.pi
-
-# Copy LLM agent instructions to Claude, Codex, and Shelley config directories
 # Shelley uses ~/.config/shelley/ (XDG convention, directory already created above)
 COPY AGENTS.md /home/exedev/.config/shelley/AGENTS.md
-RUN chown exedev:exedev /home/exedev/.config/shelley/AGENTS.md && \
-    ln -s /home/exedev/.config/shelley/AGENTS.md /home/exedev/.claude/CLAUDE.md && \
-    ln -s /home/exedev/.config/shelley/AGENTS.md /home/exedev/.codex/AGENTS.md && \
-    ln -s /home/exedev/.config/shelley/AGENTS.md /home/exedev/.pi/AGENTS.md
-
-# Install Claude and Codex through exeuntu's direct updaters.
-USER root
-RUN exeuntu update claude && \
-    test -x /usr/local/bin/claude && \
-    /usr/local/bin/claude --version
-RUN exeuntu update codex && \
-    test -x /usr/local/bin/codex && \
-    /usr/local/bin/codex --version
-
-# Install pi (pi-coding-agent) through exeuntu's updater.
-ARG PI_VERSION=
-USER exedev
-RUN if [ -n "${PI_VERSION}" ]; then \
-        exeuntu update pi --home /home/exedev --version "${PI_VERSION}"; \
-    else \
-        exeuntu update pi --home /home/exedev; \
-    fi && \
-    test -x /home/exedev/.local/bin/pi && \
-    /home/exedev/.local/bin/pi --version
-USER root
-RUN ln -sf /home/exedev/.local/bin/pi /usr/local/bin/pi
-
-# Install pi exe.dev extension (LLM gateway + environment context).
-# Pre-fetch catalog.json so the first request Just Works immediately.
-# Each subsequent pi run will update the catalog.
-COPY pi-extension/ /home/exedev/.pi/agent/extensions/exe-dev/
-RUN curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --max-time 30 \
-      https://exe.dev/llm-gateway-models.json \
-      -o /home/exedev/.pi/agent/extensions/exe-dev/catalog.json && \
-    jq -e '.schemaVersion | numbers' \
-      /home/exedev/.pi/agent/extensions/exe-dev/catalog.json > /dev/null
-RUN chown -R exedev:exedev /home/exedev/.pi/agent
-
-# Pre-install fd at the path pi checks first (~/.pi/agent/bin/fd), so pi
-# doesn't try (and on a fresh VM, often fail with a GitHub API 403) to
-# download it on first use.
-RUN ARCH=$(uname -m) && \
-    case ${ARCH} in \
-        x86_64) FD_ARCH="x86_64-unknown-linux-gnu" ;; \
-        aarch64|arm64) FD_ARCH="aarch64-unknown-linux-gnu" ;; \
-        *) echo "Unsupported architecture: ${ARCH}" && exit 1 ;; \
-    esac && \
-    FD_VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/sharkdp/fd/releases/latest | sed 's|.*/tag/||') && \
-    mkdir -p /home/exedev/.pi/agent/bin && \
-    TMPDIR=$(mktemp -d) && \
-    curl -fsSL "https://github.com/sharkdp/fd/releases/download/${FD_VERSION}/fd-${FD_VERSION}-${FD_ARCH}.tar.gz" | \
-        tar -xz -C "${TMPDIR}" && \
-    mv "${TMPDIR}/fd-${FD_VERSION}-${FD_ARCH}/fd" /home/exedev/.pi/agent/bin/fd && \
-    rm -rf "${TMPDIR}" && \
-    chmod 0755 /home/exedev/.pi/agent/bin/fd && \
-    chown -R exedev:exedev /home/exedev/.pi/agent/bin
+RUN chown exedev:exedev /home/exedev/.config/shelley/AGENTS.md 
 
 # Custom nginx config and index page (nginx is installed but disabled by default)
 COPY nginx.conf /etc/nginx/sites-available/default
